@@ -14,6 +14,7 @@ use crate::{api::cursor::proxy, Error, Result};
 
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
+const LOCAL_LOOP_GATE: &str = "agent_host_local_loop";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -51,7 +52,7 @@ fn patch_upstream(response: proxy::BufferedResponse) -> Result<Response<Body>> {
     let (framed, payload) = unary_payload(&response.body)?;
     let mut message = BootstrapStatsigResponse::decode(payload)?;
     let mut config = serde_json::from_str::<Value>(&message.config)?;
-    enable_agent_retries(&mut config)?;
+    apply_gate_overrides(&mut config)?;
     message.config = serde_json::to_string(&config)?;
     Ok(response.with_body(encode_unary(&message, framed)))
 }
@@ -74,7 +75,7 @@ fn local_response() -> Result<Response<Body>> {
         },
         "time": generated_at_ms
     });
-    enable_agent_retries(&mut config)?;
+    apply_gate_overrides(&mut config)?;
     let message = BootstrapStatsigResponse {
         config: serde_json::to_string(&config)?,
         generated_at_ms,
@@ -96,8 +97,18 @@ fn local_response() -> Result<Response<Body>> {
     Ok(response)
 }
 
-fn enable_agent_retries(config: &mut Value) -> Result<()> {
-    let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+fn apply_gate_overrides(config: &mut Value) -> Result<()> {
+    set_gate(config, AGENT_RETRIES_GATE, true)?;
+    // Cursor 3.27 can run the agent loop inside a local harness that asks the
+    // backend for model inference through aiserver.v1.InferenceService/RunInference.
+    // This server implements the backend agent loop: RunSSE plus AgentClientMessage
+    // BidiAppend frames. Keep the client on that loop.
+    set_gate(config, LOCAL_LOOP_GATE, false)?;
+    Ok(())
+}
+
+fn set_gate(config: &mut Value, name: &str, value: bool) -> Result<()> {
+    let gate_key = statsig_key(config, name);
     let root = config
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig bootstrap config must be an object".into()))?;
@@ -106,7 +117,7 @@ fn enable_agent_retries(config: &mut Value) -> Result<()> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig feature_gates must be an object".into()))?;
-    gates.insert(gate_key.clone(), enabled_gate(&gate_key));
+    gates.insert(gate_key.clone(), gate(&gate_key, value));
     Ok(())
 }
 
@@ -127,10 +138,10 @@ fn djb2(value: &str) -> String {
         .to_string()
 }
 
-fn enabled_gate(name: &str) -> Value {
+fn gate(name: &str, value: bool) -> Value {
     json!({
         "name": name,
-        "value": true,
+        "value": value,
         "rule_id": LOCAL_RULE,
         "ruleID": LOCAL_RULE,
         "group_name": LOCAL_RULE,
@@ -173,4 +184,53 @@ fn encode_unary(message: &impl Message, framed: bool) -> Bytes {
     output.put_u32(payload.len() as u32);
     output.extend_from_slice(&payload);
     output.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feature_gates(config: &Value) -> &Map<String, Value> {
+        config
+            .get("feature_gates")
+            .and_then(Value::as_object)
+            .expect("feature_gates object")
+    }
+
+    #[test]
+    fn keeps_the_client_on_the_backend_agent_loop() {
+        let mut config = json!({"feature_gates": {}, "hash_used": "none"});
+        apply_gate_overrides(&mut config).expect("overrides apply");
+        let gates = feature_gates(&config);
+        assert_eq!(
+            gates.get(LOCAL_LOOP_GATE).map(|gate| &gate["value"]),
+            Some(&Value::Bool(false)),
+            "Cursor 3.27 must not use the local loop that appends RunInference frames"
+        );
+        assert_eq!(
+            gates.get(AGENT_RETRIES_GATE).map(|gate| &gate["value"]),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn overrides_hashed_gate_names() {
+        let mut config = json!({"feature_gates": {}, "hash_used": "djb2"});
+        apply_gate_overrides(&mut config).expect("overrides apply");
+        let gates = feature_gates(&config);
+        for (name, expected) in [(AGENT_RETRIES_GATE, true), (LOCAL_LOOP_GATE, false)] {
+            let key = djb2(name);
+            let gate = gates
+                .get(&key)
+                .unwrap_or_else(|| panic!("{key} must be present"));
+            assert_eq!(gate["name"], Value::String(key));
+            assert_eq!(gate["value"], Value::Bool(expected));
+        }
+    }
+
+    #[test]
+    fn rejects_a_config_without_an_object_root() {
+        let mut config = json!([]);
+        assert!(apply_gate_overrides(&mut config).is_err());
+    }
 }
