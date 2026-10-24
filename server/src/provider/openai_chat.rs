@@ -240,7 +240,13 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
     if !instructions.is_empty() {
         output.push(json!({"role": "system", "content": instructions}));
     }
+    // Chat Completions tool messages accept text only, so Tool images follow
+    // their Tool-call batch as user content that names the source call.
+    let mut tool_images: Vec<Value> = Vec::new();
     for message in messages {
+        if !matches!(message.content, ProjectedContent::ToolResult(_)) {
+            output.append(&mut tool_images);
+        }
         let mut value = Map::new();
         value.insert(
             "role".into(),
@@ -293,20 +299,36 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
                 }
             }
             ProjectedContent::ToolResult(result) => {
-                value.insert(
-                    "content".into(),
-                    if result.provider_parts.is_empty() {
-                        Value::String(result.content.clone())
-                    } else {
-                        chat_content(&Role::User, &result.provider_parts)?
-                    },
-                );
+                value.insert("content".into(), Value::String(result.content.clone()));
                 value.insert("tool_call_id".into(), Value::String(result.call_id.clone()));
+                tool_images.extend(tool_image_content(result));
             }
         }
         output.push(Value::Object(value));
     }
+    output.append(&mut tool_images);
     Ok(output)
+}
+
+fn tool_image_content(result: &crate::model::ToolResultContent) -> Option<Value> {
+    let mut content = vec![json!({
+        "type": "text",
+        "text": format!(
+            "Images returned by Tool call {} ({}):",
+            result.call_id, result.name
+        ),
+    })];
+    content.extend(result.provider_parts.iter().filter_map(|part| match part {
+        ContentPart::Image { mime_type, data } => Some(json!({
+            "type":"image_url",
+            "image_url":{"url":format!(
+                "data:{mime_type};base64,{}",
+                STANDARD.encode(data)
+            )},
+        })),
+        ContentPart::Text { .. } => None,
+    }));
+    (content.len() > 1).then(|| json!({"role": "user", "content": content}))
 }
 
 fn chat_content(_role: &Role, parts: &[ContentPart]) -> Result<Value> {
@@ -465,5 +487,114 @@ mod tests {
     fn a_truncated_response_stays_truncated_even_with_tool_calls() {
         assert_eq!(map_finish("length", true), FinishReason::Length);
         assert_eq!(map_finish("length", false), FinishReason::Length);
+    }
+
+    fn assistant(calls: Vec<ToolCallContent>) -> ProjectedMessage {
+        ProjectedMessage {
+            message_id: "assistant".into(),
+            role: Role::Assistant,
+            content: ProjectedContent::Assistant {
+                text: String::new(),
+                thinking: String::new(),
+                replay_state: None,
+                calls,
+            },
+        }
+    }
+
+    fn tool_call(id: &str) -> ToolCallContent {
+        ToolCallContent {
+            index: 0,
+            call_id: id.into(),
+            name: "look".into(),
+            arguments: json!({}),
+        }
+    }
+
+    fn tool_result(id: &str, with_image: bool) -> ProjectedMessage {
+        let mut provider_parts = vec![ContentPart::Text {
+            text: "MCP image: image/png (4 bytes)".into(),
+        }];
+        if with_image {
+            provider_parts.push(ContentPart::Image {
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3, 4],
+            });
+        }
+        ProjectedMessage {
+            message_id: format!("result-{id}"),
+            role: Role::Tool,
+            content: ProjectedContent::ToolResult(crate::model::ToolResultContent {
+                call_id: id.into(),
+                name: "look".into(),
+                content: "MCP image: image/png (4 bytes)".into(),
+                is_error: false,
+                images: Vec::new(),
+                provider_parts,
+            }),
+        }
+    }
+
+    /// Chat Completions tool messages accept text only, so a Tool image must
+    /// travel as user content that names the call it belongs to.
+    #[test]
+    fn tool_images_follow_their_tool_call_as_user_content() {
+        let messages = openai_chat_messages(
+            "",
+            &[
+                assistant(vec![tool_call("call-1")]),
+                tool_result("call-1", true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "MCP image: image/png (4 bytes)");
+        assert_eq!(messages[2]["role"], "user");
+        assert!(messages[2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("call-1"));
+        assert_eq!(messages[2]["content"][1]["type"], "image_url");
+    }
+
+    #[test]
+    fn parallel_tool_results_buffer_their_images_after_the_batch() {
+        let messages = openai_chat_messages(
+            "",
+            &[
+                assistant(vec![tool_call("call-1"), tool_call("call-2")]),
+                tool_result("call-1", true),
+                tool_result("call-2", true),
+            ],
+        )
+        .unwrap();
+
+        let roles = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, vec!["assistant", "tool", "tool", "user", "user"]);
+        assert!(messages[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("call-1"));
+        assert!(messages[4]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("call-2"));
+    }
+
+    #[test]
+    fn tool_results_without_images_send_no_extra_user_message() {
+        let messages = openai_chat_messages(
+            "",
+            &[
+                assistant(vec![tool_call("call-1")]),
+                tool_result("call-1", false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 2);
     }
 }

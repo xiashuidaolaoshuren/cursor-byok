@@ -542,7 +542,7 @@ pub(crate) fn responses_usage(value: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ProviderReplayState;
+    use crate::model::{ProviderReplayState, ToolResultContent};
 
     #[test]
     fn reasoning_replay_projects_response_items_to_valid_input_items() {
@@ -579,6 +579,42 @@ mod tests {
                 "content": [],
                 "encrypted_content": "opaque"
             })]
+        );
+    }
+
+    /// Responses accepts images inside `function_call_output`, so the Tool
+    /// result keeps them attached to the call that produced them.
+    #[test]
+    fn tool_images_stay_inside_the_function_call_output() {
+        let messages = [ProjectedMessage {
+            message_id: "result".into(),
+            role: Role::Tool,
+            content: ProjectedContent::ToolResult(ToolResultContent {
+                call_id: "look-1".into(),
+                name: "look".into(),
+                content: "viewport captured".into(),
+                is_error: false,
+                images: Vec::new(),
+                provider_parts: vec![
+                    ContentPart::Text {
+                        text: "viewport captured".into(),
+                    },
+                    ContentPart::Image {
+                        mime_type: "image/png".into(),
+                        data: vec![1, 2, 3],
+                    },
+                ],
+            }),
+        }];
+
+        let input = responses_input(&messages).unwrap();
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "look-1");
+        assert_eq!(input[0]["output"][0]["type"], "input_text");
+        assert_eq!(input[0]["output"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["output"][1]["image_url"],
+            "data:image/png;base64,AQID"
         );
     }
 }

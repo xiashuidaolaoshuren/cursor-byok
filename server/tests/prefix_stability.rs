@@ -582,7 +582,7 @@ fn tool_result_with_call(
                 .map(str::to_string)
                 .unwrap_or_else(|| output.to_string()),
             is_error: false,
-            image: None,
+            images: Vec::new(),
             provider_parts: Vec::new(),
         }),
         runtime_event_id: None,
@@ -599,7 +599,7 @@ fn named_tool_result(name: &str, output: &str) -> CanonicalMessage {
             name: name.into(),
             content: output.into(),
             is_error: false,
-            image: None,
+            images: Vec::new(),
             provider_parts: Vec::new(),
         }),
         runtime_event_id: None,

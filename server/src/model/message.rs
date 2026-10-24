@@ -37,8 +37,8 @@ pub struct ToolResultContent {
     pub name: String,
     pub content: String,
     pub is_error: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<ToolImageReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImageReference>,
     #[serde(skip)]
     pub provider_parts: Vec<ContentPart>,
 }

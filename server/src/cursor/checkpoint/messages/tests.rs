@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::model::{
     project_messages, CanonicalMessage, ContentPart, MessageContent, ProjectedContent,
-    ProjectedMessage, ProviderReplayState, Role, ToolCall, ToolResultContent, ToolRoundAssistant,
+    ProjectedMessage, ProviderReplayState, Role, ToolCall, ToolImageReference, ToolResultContent,
+    ToolRoundAssistant,
 };
 
 use super::{decode, decode_pending, encode::wire_message, staged_tool_round};
@@ -110,7 +111,7 @@ fn cursor_wire_ids_are_projection_metadata_not_internal_message_ids() {
             name: "Read".into(),
             content: "ok".into(),
             is_error: false,
-            image: None,
+            images: Vec::new(),
             provider_parts: Vec::new(),
         }),
     };
@@ -268,4 +269,60 @@ fn opaque_cursor_reasoning_signature_round_trips_without_decoding() {
     let projected = project_messages(&[message]).unwrap();
     let encoded = wire_message(&projected[0], "model", None).unwrap();
     assert_eq!(encoded["content"][0]["signature"], signature);
+}
+
+fn tool_result_message(images: Vec<ToolImageReference>) -> ProjectedMessage {
+    ProjectedMessage {
+        message_id: "result".into(),
+        role: Role::Tool,
+        content: ProjectedContent::ToolResult(ToolResultContent {
+            call_id: "call-1".into(),
+            name: "look".into(),
+            content: "MCP image: image/png (64 bytes)".into(),
+            is_error: false,
+            images,
+            provider_parts: Vec::new(),
+        }),
+    }
+}
+
+fn image_reference(blob: &str, mime_type: &str) -> ToolImageReference {
+    ToolImageReference {
+        blob_id: blob.into(),
+        mime_type: mime_type.into(),
+        path: String::new(),
+    }
+}
+
+#[test]
+fn tool_result_image_references_round_trip_through_the_checkpoint() {
+    let images = vec![
+        image_reference("blob-a", "image/png"),
+        image_reference("blob-b", "image/gif"),
+    ];
+    let encoded = wire_message(&tool_result_message(images.clone()), "model", None).unwrap();
+    assert_eq!(
+        encoded["content"][0]["providerOptions"]["cursor"]["images"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let decoded = decode(
+        serde_json::to_vec(&encoded).unwrap().as_slice(),
+        "cursor-root:images".into(),
+    )
+    .unwrap();
+    let MessageContent::ToolResult(result) = decoded.content else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.images, images);
+}
+
+/// Roots without images must keep the exact wire shape they had before Tool
+/// images existed, or every published root would change identity.
+#[test]
+fn text_only_tool_results_add_no_image_metadata() {
+    let encoded = wire_message(&tool_result_message(Vec::new()), "model", None).unwrap();
+    assert!(encoded["content"][0].get("providerOptions").is_none());
 }

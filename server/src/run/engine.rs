@@ -233,7 +233,7 @@ impl RunEngine {
                 "starting model call"
             );
             let mut history = history;
-            if let Err(error) = hydrate_tool_images(&self.store, &mut history).await {
+            if let Err(error) = super::tool_images::hydrate(&self.store, &mut history).await {
                 return (RunOutcome::Failed(error.into()), usage);
             }
             // The usage anchor counts persisted messages only; a transient
@@ -794,11 +794,15 @@ impl RunEngine {
             .begin_provider_call(&prepared.run_id)
             .await
             .map_err(|error| RunOutcome::Failed(error.into()))?;
-        let history = crate::model::project_messages(&compactable)
-            .map(|history| {
-                super::compaction::compaction_history(history, prepared.model.context_window_tokens)
-            })
+        let mut history = crate::model::project_messages(&compactable)
             .map_err(|error| RunOutcome::Failed(error.into()))?;
+        // The summarizer sees the same pixels the agent saw; otherwise the
+        // summary silently loses what an image-bearing Tool result contained.
+        super::tool_images::hydrate(&self.store, &mut history)
+            .await
+            .map_err(|error| RunOutcome::Failed(error.into()))?;
+        let history =
+            super::compaction::compaction_history(history, prepared.model.context_window_tokens);
         let mut model = prepared.model.clone();
         model.max_output_tokens = Some(super::compaction::OUTPUT_TOKENS);
         model.reasoning.enabled = false;
@@ -964,40 +968,6 @@ impl RunEngine {
         }
         Ok((checkpoint, compaction_usage))
     }
-}
-
-async fn hydrate_tool_images(
-    store: &Store,
-    messages: &mut [crate::model::ProjectedMessage],
-) -> crate::Result<()> {
-    use crate::{
-        model::{ContentPart, ProjectedContent},
-        store::BlobId,
-        Error,
-    };
-
-    for message in messages {
-        let ProjectedContent::ToolResult(result) = &mut message.content else {
-            continue;
-        };
-        let Some(image) = &result.image else {
-            continue;
-        };
-        let id = BlobId::from_base64(&image.blob_id)?;
-        let data = store.get_blob(&id).await?.ok_or_else(|| {
-            Error::Protocol(format!("Read image Blob is missing: {}", image.blob_id))
-        })?;
-        result.provider_parts = vec![
-            ContentPart::Text {
-                text: result.content.clone(),
-            },
-            ContentPart::Image {
-                mime_type: image.mime_type.clone(),
-                data,
-            },
-        ];
-    }
-    Ok(())
 }
 
 fn context_usage_snapshot(tokens: u64) -> Usage {

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::{
     model::{
         CanonicalMessage, ContentPart, MessageContent, Origin, RecoveredToolRound, Role, ToolCall,
-        ToolCallContent, ToolResultContent, ToolRoundAssistant, ToolRoundId,
+        ToolCallContent, ToolImageReference, ToolResultContent, ToolRoundAssistant, ToolRoundId,
     },
     store::BlobId,
     Error, Result,
@@ -234,6 +234,27 @@ fn decode_tool_result(value: &Value) -> Result<ToolResultContent> {
         .and_then(Value::as_array)
         .and_then(|parts| parts.first())
         .ok_or_else(|| Error::Protocol("Cursor tool message has no result part".into()))?;
+    let images = part
+        .pointer("/providerOptions/cursor/images")
+        .and_then(Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .map(|image| {
+                    Ok(ToolImageReference {
+                        blob_id: required_string(image, "blobId")?.into(),
+                        mime_type: required_string(image, "mimeType")?.into(),
+                        path: image
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(ToolResultContent {
         call_id: required_string(part, "toolCallId")?.into(),
         name: required_string(part, "toolName")?.into(),
@@ -246,7 +267,7 @@ fn decode_tool_result(value: &Value) -> Result<ToolResultContent> {
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        image: None,
+        images,
         provider_parts: Vec::new(),
     })
 }

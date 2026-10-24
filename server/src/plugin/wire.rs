@@ -246,7 +246,7 @@ mod tests {
                             name: "read".into(),
                             content: "data".into(),
                             is_error: false,
-                            image: None,
+                            images: Vec::new(),
                             provider_parts: Vec::new(),
                         }),
                     },

@@ -52,7 +52,13 @@ export function buildChatBody(call: OpenAiChatCall): Record<string, JsonValue> {
   if (call.request.instructions) {
     messages.push({ role: "system", content: call.request.instructions });
   }
+  // Chat Completions 的 tool 消息只接受文本;工具返回的图片作为一批
+  // tool 响应之后的用户内容发送,并注明来源工具调用。
+  const toolImages: JsonValue[] = [];
   for (const message of call.request.messages) {
+    if (message.role !== "tool") {
+      messages.push(...toolImages.splice(0));
+    }
     if (message.role === "assistant") {
       const reasoning = message.replayState?.providerKind === REPLAY_KIND
         ? text(record(message.replayState.value)?.reasoning_content)
@@ -76,13 +82,27 @@ export function buildChatBody(call: OpenAiChatCall): Record<string, JsonValue> {
     } else if (message.role === "tool") {
       messages.push({
         role: "tool",
-        content: message.parts.length === 0 ? message.content : chatContent(message.parts),
+        content: message.content,
         tool_call_id: message.callId,
       });
+      const content: JsonValue[] = [{
+        type: "text",
+        text: `Images returned by Tool call ${message.callId} (${message.name}):`,
+      }];
+      for (const part of message.parts) {
+        if (part.type === "image") {
+          content.push({
+            type: "image_url",
+            image_url: { url: `data:${part.mediaType};base64,${part.dataBase64}` },
+          });
+        }
+      }
+      if (content.length > 1) toolImages.push({ role: "user", content });
     } else {
       messages.push({ role: message.role, content: chatContent(message.content) });
     }
   }
+  messages.push(...toolImages.splice(0));
   const body: Record<string, JsonValue> = {
     model: call.model,
     messages,

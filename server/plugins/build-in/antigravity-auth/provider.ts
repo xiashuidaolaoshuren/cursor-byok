@@ -199,7 +199,7 @@ function sanitizeSchema(value: unknown): unknown {
   return clean;
 }
 
-function convertToCloudCodeContents(
+export function convertToCloudCodeContents(
   instructions: string,
   messages: LlmMessage[],
 ): {
@@ -250,17 +250,22 @@ function convertToCloudCodeContents(
         rawContents.push({ role: "model", parts });
       }
     } else if (msg.role === "tool") {
-      rawContents.push({
-        role: "user",
-        parts: [
-          {
-            functionResponse: {
-              name: msg.name || "function",
-              response: { result: msg.content },
-            },
+      // Generate Content 的 FunctionResponse 不接受图片;与 functionResponse
+      // 同属一个 user 内容的 inlineData 分块是模型能看到图片的方式。
+      const parts: Array<Record<string, unknown>> = [
+        {
+          functionResponse: {
+            name: msg.name || "function",
+            response: { result: msg.content },
           },
-        ],
-      });
+        },
+      ];
+      for (const p of msg.parts) {
+        if (p.type === "image") {
+          parts.push({ inlineData: { mimeType: p.mediaType, data: p.dataBase64 } });
+        }
+      }
+      rawContents.push({ role: "user", parts });
     } else if (msg.role === "user") {
       const parts: Array<Record<string, unknown>> = [];
       for (const p of msg.content) {

@@ -6,7 +6,7 @@ import type {
 } from "cursor-byok:plugin";
 import type { LlmRequest, ModelEvent } from "cursor-byok:provider";
 import type { ResourceSnapshot } from "cursor-byok:resource";
-import { antigravityProvider, isQuotaError } from "./provider.ts";
+import { antigravityProvider, convertToCloudCodeContents, isQuotaError } from "./provider.ts";
 import { RESOURCE_TYPE } from "./resources.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
@@ -143,4 +143,28 @@ Deno.test("isQuotaError identifies rate limits and quota exhaustion", () => {
   assert(isQuotaError("Rate limit exceeded for model"));
   assert(isQuotaError("HTTP 429 Too Many Requests"));
   assert(!isQuotaError("Invalid authorization header"));
+});
+
+Deno.test("tool images become inlineData beside their function response", () => {
+  const { contents } = convertToCloudCodeContents("", [
+    {
+      role: "tool",
+      callId: "call-1",
+      name: "look",
+      content: "frame",
+      isError: false,
+      parts: [
+        { type: "text", text: "frame" },
+        { type: "image", mediaType: "image/png", dataBase64: "AQIDBA==" },
+      ],
+    },
+  ]);
+
+  assertEquals(contents, [{
+    role: "user",
+    parts: [
+      { functionResponse: { name: "look", response: { result: "frame" } } },
+      { inlineData: { mimeType: "image/png", data: "AQIDBA==" } },
+    ],
+  }]);
 });

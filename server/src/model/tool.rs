@@ -45,13 +45,16 @@ pub struct ToolResult {
     pub call_id: String,
     pub content: String,
     pub is_error: bool,
-    pub image: Option<ToolImageReference>,
+    /// Images returned by the Tool, in the order the Tool produced them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImageReference>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolImageReference {
     pub blob_id: String,
     pub mime_type: String,
+    /// Source path when the Tool read a file, otherwise empty.
     pub path: String,
 }
 

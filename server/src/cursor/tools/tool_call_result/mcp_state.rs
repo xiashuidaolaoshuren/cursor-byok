@@ -111,7 +111,7 @@ pub(super) fn complete(
             call_id: call.call_id.clone(),
             content,
             is_error,
-            image: None,
+            images: Vec::new(),
         },
         pb::tool_call::Tool::GetMcpToolsToolCall(pb::GetMcpToolsToolCall {
             args: Some(args),

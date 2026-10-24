@@ -239,14 +239,32 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
             }));
             Value::Array(parts)
         }
-        ProjectedContent::ToolResult(result) => json!([{
-            "type": "tool-result",
-            "toolCallId": result.call_id,
-            "toolName": result.name,
-            "result": result.content,
-            "experimental_content": [{"type":"text", "text":result.content}],
-            "isError": result.is_error,
-        }]),
+        ProjectedContent::ToolResult(result) => {
+            let mut part = Map::new();
+            part.insert("type".into(), json!("tool-result"));
+            part.insert("toolCallId".into(), json!(result.call_id));
+            part.insert("toolName".into(), json!(result.name));
+            part.insert("result".into(), json!(result.content));
+            part.insert(
+                "experimental_content".into(),
+                json!([{"type":"text", "text":result.content}]),
+            );
+            part.insert("isError".into(), json!(result.is_error));
+            // Images are references, not bytes: the root stays small and the
+            // pixels live in the Blob store. Text-only results keep the exact
+            // wire shape they had before images existed.
+            if !result.images.is_empty() {
+                part.insert(
+                    "providerOptions".into(),
+                    json!({"cursor": {"images": result.images.iter().map(|image| json!({
+                        "blobId": image.blob_id,
+                        "mimeType": image.mime_type,
+                        "path": image.path,
+                    })).collect::<Vec<_>>()}}),
+                );
+            }
+            Value::Array(vec![Value::Object(part)])
+        }
     })
 }
 

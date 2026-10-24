@@ -158,7 +158,7 @@ mod tests {
                     name: "TodoWrite".into(),
                     content: "{}".into(),
                     is_error: false,
-                    image: None,
+                    images: Vec::new(),
                     provider_parts: Vec::new(),
                 }),
                 runtime_event_id: None,

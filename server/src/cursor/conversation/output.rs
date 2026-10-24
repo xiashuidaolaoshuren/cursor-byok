@@ -798,9 +798,16 @@ impl ConversationOutput {
         if interrupted_tool_calls.contains(&completion.result().call_id) {
             return Ok(None);
         }
-        if let Some(image) = completion.take_read_image() {
-            let blob_id = self.store.put_blob(&image.data, &[]).await?;
-            completion.persist_read_image(&blob_id, &image)?;
+        let images = completion.take_images();
+        if !images.is_empty() {
+            // Store every Blob before the result is committed, so canonical
+            // history never references pixels that were not written.
+            let mut stored = Vec::with_capacity(images.len());
+            for image in images {
+                let blob_id = self.store.put_blob(&image.data, &[]).await?;
+                stored.push((blob_id, image));
+            }
+            completion.persist_images(&stored)?;
         }
         let result = completion.result();
         if result.call_id.is_empty() {

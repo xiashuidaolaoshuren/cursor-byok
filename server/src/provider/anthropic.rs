@@ -505,6 +505,7 @@ pub(crate) fn anthropic_usage(value: &Value) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ToolResultContent;
 
     #[test]
     fn cached_tokens_are_included_once_in_anthropic_context_input() {
@@ -543,5 +544,45 @@ mod tests {
         assert_eq!(usage.context_input_tokens, Some(100_766));
         assert_eq!(usage.output_tokens, Some(191));
         assert_eq!(usage.total_tokens, Some(100_957));
+    }
+
+    /// Anthropic accepts images inside `tool_result`, so the Tool result keeps
+    /// text and pixels together in one user turn.
+    #[test]
+    fn tool_images_stay_inside_the_tool_result() {
+        let messages = [ProjectedMessage {
+            message_id: "result".into(),
+            role: Role::Tool,
+            content: ProjectedContent::ToolResult(ToolResultContent {
+                call_id: "look-1".into(),
+                name: "look".into(),
+                content: "viewport captured".into(),
+                is_error: false,
+                images: Vec::new(),
+                provider_parts: vec![
+                    ContentPart::Text {
+                        text: "viewport captured".into(),
+                    },
+                    ContentPart::Image {
+                        mime_type: "image/png".into(),
+                        data: vec![1, 2, 3],
+                    },
+                ],
+            }),
+        }];
+
+        let output = anthropic_messages(&messages).unwrap();
+        assert_eq!(output[0]["role"], "user");
+        assert_eq!(output[0]["content"][0]["type"], "tool_result");
+        assert_eq!(output[0]["content"][0]["content"][0]["type"], "text");
+        assert_eq!(output[0]["content"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            output[0]["content"][0]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(
+            output[0]["content"][0]["content"][1]["source"]["data"],
+            "AQID"
+        );
     }
 }

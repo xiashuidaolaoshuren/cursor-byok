@@ -8,7 +8,7 @@ use crate::{
     Error, Result,
 };
 
-use super::{gate, mcp_state, ReadImage, ToolCompletion};
+use super::{gate, mcp_state, ToolCompletion};
 use crate::cursor::tools::{
     edit,
     runtime::{ExecStage, PendingExec},
@@ -32,10 +32,20 @@ pub(crate) fn from_exec(
         return mcp_state::complete(pending, result);
     }
     let call = &pending.call;
-    let read_image = read_image(wire_result);
-    let (mut content, is_error) = output::output(wire_result, call)?;
-    if let Some(image) = &read_image {
-        content = format!("Read image file: {}", image.path);
+    let output::Output {
+        mut content,
+        is_error,
+        images,
+    } = output::output(wire_result, call)?;
+    // A Read of an image is rendered by Cursor from the BlobID; the model sees
+    // the image itself once the Blob is stored.
+    if let [image] = images.as_slice() {
+        if matches!(
+            wire_result,
+            Message::ReadResult(_) | Message::RedactedReadResult(_)
+        ) {
+            content = format!("Read image file: {}", image.path);
+        }
     }
     let mut rendered = match &pending.stage {
         ExecStage::DynamicMcp(definition) => {
@@ -98,48 +108,11 @@ pub(crate) fn from_exec(
             call_id: call.call_id.clone(),
             content,
             is_error,
-            image: None,
+            images: Vec::new(),
         },
         tool,
     )
-    .with_read_image(read_image))
-}
-
-fn read_image(message: &pb::exec_client_message::Message) -> Option<ReadImage> {
-    use pb::{exec_client_message::Message, read_result::Result, read_success::Output};
-    let result = match message {
-        Message::ReadResult(result) | Message::RedactedReadResult(result) => result,
-        _ => return None,
-    };
-    let Result::Success(success) = result.result.as_ref()? else {
-        return None;
-    };
-    let Output::Data(data) = success.output.as_ref()? else {
-        return None;
-    };
-    Some(ReadImage {
-        mime_type: image_mime_type(data)?.into(),
-        data: data.clone(),
-        path: success.path.clone(),
-    })
-}
-
-fn image_mime_type(data: &[u8]) -> Option<&'static str> {
-    let reader = image::ImageReader::new(std::io::Cursor::new(data))
-        .with_guessed_format()
-        .ok()?;
-    let format = reader.format()?;
-    let (width, height) = reader.into_dimensions().ok()?;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    match format {
-        image::ImageFormat::Png => Some("image/png"),
-        image::ImageFormat::Jpeg => Some("image/jpeg"),
-        image::ImageFormat::Gif => Some("image/gif"),
-        image::ImageFormat::WebP => Some("image/webp"),
-        _ => None,
-    }
+    .with_images(images))
 }
 
 pub(crate) fn edit_failure(pending: PendingExec, error: String) -> Result<ToolCompletion> {
@@ -159,7 +132,7 @@ pub(crate) fn edit_failure(pending: PendingExec, error: String) -> Result<ToolCo
             call_id: call.call_id.clone(),
             content: error,
             is_error: true,
-            image: None,
+            images: Vec::new(),
         },
         pb::tool_call::Tool::EditToolCall(tool),
     ))

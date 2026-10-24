@@ -203,7 +203,7 @@ impl Store {
                 name,
                 content: result.content.clone(),
                 is_error: result.is_error,
-                image: result.image.clone(),
+                images: result.images.clone(),
                 provider_parts: Vec::new(),
             }),
             runtime_event_id: None,

@@ -261,7 +261,7 @@ fn parse_chat_messages(
                         .unwrap_or_else(|| "tool".into()),
                     content: text_content(message.get("content")).unwrap_or_default(),
                     is_error: false,
-                    image: None,
+                    images: Vec::new(),
                     provider_parts: Vec::new(),
                 }),
             }),
@@ -286,7 +286,7 @@ fn parse_responses_input(value: &Value, history: &mut Vec<ProjectedMessage>) -> 
                         .unwrap_or_else(|| "tool".into()),
                     content: text_content(item.get("output")).unwrap_or_default(),
                     is_error: false,
-                    image: None,
+                    images: Vec::new(),
                     provider_parts: Vec::new(),
                 }),
             }),
@@ -374,7 +374,7 @@ fn parse_anthropic_messages(
                                     .get("is_error")
                                     .and_then(Value::as_bool)
                                     .unwrap_or(false),
-                                image: None,
+                                images: Vec::new(),
                                 provider_parts: Vec::new(),
                             }),
                         });

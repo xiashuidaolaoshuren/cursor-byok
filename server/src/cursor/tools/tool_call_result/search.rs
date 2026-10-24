@@ -83,7 +83,7 @@ pub(crate) fn complete(
             call_id: call.call_id.clone(),
             content,
             is_error,
-            image: None,
+            images: Vec::new(),
         },
         Tool::McpToolCall(pb::McpToolCall {
             args: Some(pb::McpArgs {

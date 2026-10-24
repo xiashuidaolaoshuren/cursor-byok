@@ -542,6 +542,442 @@ async fn recovery_rejects_a_kv_get_payload_whose_hash_does_not_match_the_blob_id
         .contains("Blob hash mismatch"));
 }
 
+const FRAME_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50,
+    0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// The screenshot scenario: an MCP Tool returns text and a viewport image, and
+/// the next model call must carry the pixels without a Read call.
+#[tokio::test]
+async fn mcp_tool_images_reach_the_next_model_call() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "model-1".into(),
+        },
+        ModelEvent::ToolCallStart {
+            index: 0,
+            call_id: "look-1".into(),
+            name: "blender-look".into(),
+        },
+        ModelEvent::ToolCallArgumentsDelta {
+            index: 0,
+            delta: "{}".into(),
+        },
+        ModelEvent::ToolCallEnd { index: 0 },
+        ModelEvent::Done(FinishReason::ToolUse),
+    ]);
+    provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "model-2".into(),
+        },
+        ModelEvent::TextStart,
+        ModelEvent::TextDelta("a cube on a grid".into()),
+        ModelEvent::TextEnd,
+        ModelEvent::Done(FinishReason::Stop),
+    ]);
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let handle = TransportRegistry::new(
+        store,
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    )
+    .get_or_create("mcp-image-run")
+    .await
+    .unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(mcp_start_request()),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            break;
+        }
+        match pb::AgentServerMessage::decode(payload).unwrap().message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => {
+                acknowledge(&handle, &mut seqno, kv.id).await;
+            }
+            Some(pb::agent_server_message::Message::ExecServerMessage(exec)) => {
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(mcp_image_result(exec.id)),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(provider.requests().len(), 2);
+    let continuation = &provider.requests()[1];
+    let image = continuation
+        .history
+        .iter()
+        .find_map(|message| match &message.content {
+            cursor_server::model::ProjectedContent::ToolResult(result) => {
+                result.provider_parts.iter().find_map(|part| match part {
+                    cursor_server::model::ContentPart::Image {
+                        mime_type, data, ..
+                    } if data == FRAME_PNG => Some(mime_type.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        });
+    assert_eq!(
+        image.as_deref(),
+        Some("image/png"),
+        "the next model call must receive the MCP image itself"
+    );
+}
+
+/// A Tool image must reach the model on the next turn even when that turn runs
+/// against a database that never stored the Blob; it is fetched from the
+/// published checkpoint instead.
+#[tokio::test]
+async fn read_images_survive_a_fresh_store_resume() {
+    let (_first_directory, first_store) = fixtures::temp_store().await;
+    let first_provider = fake_provider::FakeProvider::default();
+    first_provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "model-1".into(),
+        },
+        ModelEvent::ToolCallStart {
+            index: 0,
+            call_id: "read-image".into(),
+            name: "Read".into(),
+        },
+        ModelEvent::ToolCallArgumentsDelta {
+            index: 0,
+            delta: "{\"path\":\"/tmp/frame.png\"}".into(),
+        },
+        ModelEvent::ToolCallEnd { index: 0 },
+        ModelEvent::Done(FinishReason::ToolUse),
+    ]);
+    first_provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "model-2".into(),
+        },
+        ModelEvent::TextStart,
+        ModelEvent::TextDelta("seen".into()),
+        ModelEvent::TextEnd,
+        ModelEvent::Done(FinishReason::Stop),
+    ]);
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let first = TransportRegistry::new(
+        first_store,
+        Arc::new(first_provider.clone()),
+        PromptCompiler::new(assets),
+    )
+    .get_or_create("image-run")
+    .await
+    .unwrap();
+    let mut output = first.subscribe();
+    first
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(start_request()),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let mut settled = None;
+    let mut published = std::collections::HashMap::<Vec<u8>, Vec<u8>>::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            break;
+        }
+        match pb::AgentServerMessage::decode(payload).unwrap().message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => {
+                if let Some(pb::kv_server_message::Message::SetBlobArgs(args)) = &kv.message {
+                    published.insert(args.blob_id.clone(), args.blob_data.clone());
+                }
+                acknowledge(&first, &mut seqno, kv.id).await;
+            }
+            Some(pb::agent_server_message::Message::ExecServerMessage(exec)) => {
+                first
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(read_image_result(exec.id, FRAME_PNG)),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            Some(pb::agent_server_message::Message::ConversationCheckpointUpdate(state)) => {
+                settled = Some(state);
+            }
+            _ => {}
+        }
+    }
+    let settled = settled.expect("the first run must publish a settled checkpoint");
+    first.disconnect().await;
+
+    // The continuation after the Tool result already saw the image.
+    assert_eq!(first_provider.requests().len(), 2);
+    assert!(request_has_frame(&first_provider.requests()[1]));
+    assert!(
+        published.contains_key(BlobId::digest(FRAME_PNG).as_bytes().as_slice()),
+        "the image Blob must be sent to the client so another store can recover it"
+    );
+
+    let (_resume_directory, resume_store) = fixtures::temp_store().await;
+    let resume_provider = fake_provider::FakeProvider::default();
+    resume_provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "model-3".into(),
+        },
+        ModelEvent::TextStart,
+        ModelEvent::TextDelta("recalled".into()),
+        ModelEvent::TextEnd,
+        ModelEvent::Done(FinishReason::Stop),
+    ]);
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let resumed = TransportRegistry::new(
+        resume_store.clone(),
+        Arc::new(resume_provider.clone()),
+        PromptCompiler::new(assets),
+    )
+    .get_or_create("recall-run")
+    .await
+    .unwrap();
+    let mut resumed_output = resumed.subscribe();
+    resumed
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(continue_request(settled)),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let mut end_payload = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), resumed_output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            end_payload = payload.to_vec();
+            break;
+        }
+        match pb::AgentServerMessage::decode(payload).unwrap().message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => match kv.message {
+                Some(pb::kv_server_message::Message::GetBlobArgs(args)) => {
+                    resumed
+                        .command(TransportCommand::Append {
+                            seqno,
+                            message: Box::new(pb::AgentClientMessage {
+                                message: Some(pb::agent_client_message::Message::KvClientMessage(
+                                    pb::KvClientMessage {
+                                        id: kv.id,
+                                        message: Some(
+                                            pb::kv_client_message::Message::GetBlobResult(
+                                                pb::GetBlobResult {
+                                                    blob_data: published
+                                                        .get(&args.blob_id)
+                                                        .cloned(),
+                                                    error: None,
+                                                },
+                                            ),
+                                        ),
+                                    },
+                                )),
+                            }),
+                        })
+                        .await
+                        .unwrap();
+                    seqno += 1;
+                }
+                _ => acknowledge(&resumed, &mut seqno, kv.id).await,
+            },
+            _ => {}
+        }
+    }
+
+    let requests = resume_provider.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the resumed turn must call the model exactly once: {}",
+        String::from_utf8_lossy(&end_payload)
+    );
+    assert!(
+        request_has_frame(&requests[0]),
+        "the resumed request must carry the Tool image, not a text stub"
+    );
+    assert!(
+        resume_store
+            .get_blob(&BlobId::digest(FRAME_PNG))
+            .await
+            .unwrap()
+            .is_some(),
+        "the recovered image must be written back to the fresh store"
+    );
+}
+
+fn request_has_frame(request: &cursor_server::model::ModelRequest) -> bool {
+    request.history.iter().any(|message| {
+        matches!(
+            &message.content,
+            cursor_server::model::ProjectedContent::ToolResult(result)
+                if result
+                    .provider_parts
+                    .iter()
+                    .any(|part| matches!(
+                        part,
+                        cursor_server::model::ContentPart::Image { data, .. }
+                            if data == FRAME_PNG
+                    ))
+        )
+    })
+}
+
+fn read_image_result(id: u32, data: &[u8]) -> pb::AgentClientMessage {
+    pb::AgentClientMessage {
+        message: Some(pb::agent_client_message::Message::ExecClientMessage(
+            pb::ExecClientMessage {
+                id,
+                message: Some(pb::exec_client_message::Message::ReadResult(
+                    pb::ReadResult {
+                        result: Some(pb::read_result::Result::Success(pb::ReadSuccess {
+                            path: "/tmp/frame.png".into(),
+                            output: Some(pb::read_success::Output::Data(data.to_vec())),
+                            ..Default::default()
+                        })),
+                    },
+                )),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+fn continue_request(state: pb::ConversationStateStructure) -> pb::AgentClientMessage {
+    pb::AgentClientMessage {
+        message: Some(pb::agent_client_message::Message::RunRequest(
+            pb::AgentRunRequest {
+                action: Some(pb::ConversationAction {
+                    action: Some(pb::conversation_action::Action::UserMessageAction(
+                        pb::UserMessageAction {
+                            user_message: Some(pb::UserMessage {
+                                text: "what did you see?".into(),
+                                message_id: "user-2".into(),
+                                mode: pb::AgentMode::Agent as i32,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+                conversation_state: Some(state),
+                conversation_id: Some("conversation".into()),
+                run_id: Some("recall-run".into()),
+                requested_model: Some(pb::RequestedModel {
+                    model_id: "test-model".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+fn mcp_start_request() -> pb::AgentClientMessage {
+    let mut request = start_request();
+    let Some(pb::agent_client_message::Message::RunRequest(run)) = request.message.as_mut() else {
+        panic!("expected run request");
+    };
+    run.mcp_tools = Some(pb::McpTools {
+        mcp_tools: vec![pb::McpToolDefinition {
+            name: "blender-look".into(),
+            provider_identifier: "user-blender".into(),
+            tool_name: "look".into(),
+            description: "Capture the current viewport".into(),
+            input_schema_json: Some("{\"type\":\"object\",\"properties\":{}}".into()),
+            input_schema: None,
+        }],
+    });
+    request
+}
+
+fn mcp_image_result(id: u32) -> pb::AgentClientMessage {
+    pb::AgentClientMessage {
+        message: Some(pb::agent_client_message::Message::ExecClientMessage(
+            pb::ExecClientMessage {
+                id,
+                message: Some(pb::exec_client_message::Message::McpResult(pb::McpResult {
+                    result: Some(pb::mcp_result::Result::Success(pb::McpSuccess {
+                        content: vec![
+                            pb::McpToolResultContentItem {
+                                content: Some(pb::mcp_tool_result_content_item::Content::Text(
+                                    pb::McpTextContent {
+                                        text: "viewport captured".into(),
+                                        output_location: None,
+                                    },
+                                )),
+                            },
+                            pb::McpToolResultContentItem {
+                                content: Some(pb::mcp_tool_result_content_item::Content::Image(
+                                    pb::McpImageContent {
+                                        data: FRAME_PNG.to_vec(),
+                                        mime_type: "image/png".into(),
+                                    },
+                                )),
+                            },
+                        ],
+                        is_error: false,
+                        structured_content: None,
+                    })),
+                })),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
 fn start_request() -> pb::AgentClientMessage {
     pb::AgentClientMessage {
         message: Some(pb::agent_client_message::Message::RunRequest(

@@ -46,12 +46,12 @@ fn estimate_message_tokens(message: &ProjectedMessage) -> u64 {
             let content = if result.provider_parts.is_empty() {
                 estimate_text_tokens(&result.content).saturating_add(
                     result
-                        .image
-                        .as_ref()
+                        .images
+                        .iter()
                         .map(|image| {
                             TOKENS_PER_IMAGE.saturating_add(estimate_text_tokens(&image.mime_type))
                         })
-                        .unwrap_or_default(),
+                        .sum::<u64>(),
                 )
             } else {
                 estimate_parts_tokens(&result.provider_parts)
@@ -118,7 +118,8 @@ pub(crate) fn format_token_count(tokens: u64) -> String {
 mod tests {
     use super::*;
     use crate::model::{
-        ProviderReplayState, Role, ToolCallContent, ToolDefinition, ToolResultContent,
+        ProviderReplayState, Role, ToolCallContent, ToolDefinition, ToolImageReference,
+        ToolResultContent,
     };
 
     fn prompt() -> PromptSpec {
@@ -187,7 +188,7 @@ mod tests {
                 name: "Read".into(),
                 content: "file contents".into(),
                 is_error: false,
-                image: None,
+                images: Vec::new(),
                 provider_parts: Vec::new(),
             }),
         };
@@ -199,7 +200,7 @@ mod tests {
                 name: "Read".into(),
                 content: "file contents".into(),
                 is_error: false,
-                image: None,
+                images: Vec::new(),
                 provider_parts: vec![ContentPart::Image {
                     mime_type: "image/png".into(),
                     data: vec![0; 32],
@@ -243,6 +244,36 @@ mod tests {
         assert_eq!(
             estimate_projected_messages_tokens(&[without_replay]),
             estimate_projected_messages_tokens(&[with_replay])
+        );
+    }
+
+    /// Compaction runs before hydration, so the estimate must count the
+    /// references themselves; one image must not hide the second one.
+    #[test]
+    fn every_unhydrated_tool_image_counts_toward_the_estimate() {
+        let result = |images| ProjectedMessage {
+            message_id: "result".into(),
+            role: Role::Tool,
+            content: ProjectedContent::ToolResult(ToolResultContent {
+                call_id: "call-1".into(),
+                name: "look".into(),
+                content: "image".into(),
+                is_error: false,
+                images,
+                provider_parts: Vec::new(),
+            }),
+        };
+        let image = ToolImageReference {
+            blob_id: "blob".into(),
+            mime_type: "image/png".into(),
+            path: String::new(),
+        };
+
+        let single = estimate_projected_messages_tokens(&[result(vec![image.clone()])]);
+        let double = estimate_projected_messages_tokens(&[result(vec![image.clone(), image])]);
+        assert_eq!(
+            double - single,
+            TOKENS_PER_IMAGE + estimate_text_tokens("image/png")
         );
     }
 }
