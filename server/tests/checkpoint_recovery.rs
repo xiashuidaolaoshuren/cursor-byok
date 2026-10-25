@@ -791,19 +791,19 @@ async fn read_images_survive_a_fresh_store_resume() {
         .unwrap();
 
     let mut seqno = 1;
-    let mut end_payload = Vec::new();
-    loop {
+    let end_payload = loop {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(5), resumed_output.recv())
             .await
             .unwrap()
             .unwrap();
         let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
         if flags & connect::END_STREAM_FLAG != 0 {
-            end_payload = payload.to_vec();
-            break;
+            break payload.to_vec();
         }
-        match pb::AgentServerMessage::decode(payload).unwrap().message {
-            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => match kv.message {
+        if let Some(pb::agent_server_message::Message::KvServerMessage(kv)) =
+            pb::AgentServerMessage::decode(payload).unwrap().message
+        {
+            match kv.message {
                 Some(pb::kv_server_message::Message::GetBlobArgs(args)) => {
                     resumed
                         .command(TransportCommand::Append {
@@ -831,10 +831,9 @@ async fn read_images_survive_a_fresh_store_resume() {
                     seqno += 1;
                 }
                 _ => acknowledge(&resumed, &mut seqno, kv.id).await,
-            },
-            _ => {}
+            }
         }
-    }
+    };
 
     let requests = resume_provider.requests();
     assert_eq!(
