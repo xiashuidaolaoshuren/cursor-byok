@@ -34,6 +34,7 @@ pub(crate) struct PendingExec {
 pub(crate) enum ExecStage {
     Direct,
     DynamicMcp(pb::McpToolDefinition),
+    MetaMcp(McpRoute),
     EditRead,
     EditWrite(EditWrite),
 }
@@ -56,6 +57,7 @@ pub struct McpRoute {
     pub name: String,
     pub provider_identifier: String,
     pub tool_name: String,
+    pub server_identifier: String,
     pub description: String,
 }
 
@@ -66,6 +68,17 @@ pub enum SubagentModel {
 }
 
 impl ExecContext {
+    /// Resolves the MCP route the model named, using the same identity that
+    /// dispatches the call. Rendering must not reconstruct it from display args.
+    pub fn mcp_route(&self, call: &ToolCall) -> Option<&McpRoute> {
+        if !call.name.eq_ignore_ascii_case("CallMcpTool") {
+            return None;
+        }
+        let server = call.arguments.get("server")?.as_str()?;
+        let tool = call.arguments.get("toolName")?.as_str()?;
+        self.mcp_routes.get(&(server.to_string(), tool.to_string()))
+    }
+
     pub fn task_disabled(&self, call: &ToolCall) -> bool {
         if !call.name.eq_ignore_ascii_case("Task") {
             return false;
@@ -147,6 +160,16 @@ impl CursorToolRuntime {
             None,
         )
         .await
+    }
+
+    pub(crate) async fn reserve_meta_mcp(
+        &self,
+        call: &ToolCall,
+        context: &ExecContext,
+        route: &McpRoute,
+    ) -> Result<u32> {
+        self.reserve_exec_stage(call, context, ExecStage::MetaMcp(route.clone()), None)
+            .await
     }
 
     pub(crate) async fn reserve_edit_read(

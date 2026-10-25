@@ -52,9 +52,10 @@ pub async fn client_event(
         let entry = take(message.id, pending).await?;
         return match entry.stage {
             ExecStage::EditRead => advance_edit(entry, wire_result, pending).await,
-            ExecStage::Direct | ExecStage::DynamicMcp(_) | ExecStage::EditWrite(_) => {
-                completed(entry, wire_result.clone())
-            }
+            ExecStage::Direct
+            | ExecStage::DynamicMcp(_)
+            | ExecStage::MetaMcp(_)
+            | ExecStage::EditWrite(_) => completed(entry, wire_result.clone()),
         };
     };
     use pb::shell_stream::Event;
@@ -175,6 +176,7 @@ pub async fn stream_closed(id: u32, pending: &CursorToolRuntime) -> Result<Optio
         ExecStage::DynamicMcp(definition) => {
             Ok(super::render_dynamic_mcp(&entry.call, definition, false))
         }
+        ExecStage::MetaMcp(route) => Ok(super::render_meta_mcp(&entry.call, route, false)),
         _ => super::render_tool_call(&entry.call, false),
     };
     let rendered = match rendered {

@@ -65,6 +65,7 @@ fn mcp_context(server: &str, provider: &str, tool: &str) -> ExecContext {
             name: format!("{server}-{tool}"),
             provider_identifier: provider.into(),
             tool_name: tool.into(),
+            server_identifier: server.into(),
             description: "fixture MCP tool".into(),
         },
     );
@@ -286,6 +287,35 @@ async fn call_mcp_tool_uses_the_request_descriptor_and_returns_client_errors_to_
         Some(prost_types::value::Kind::StringValue("print('ok')".into()))
     );
 
+    let Some(pb::agent_server_message::Message::InteractionUpdate(update)) =
+        requests[0].messages[0].message.as_ref()
+    else {
+        panic!("expected tool-start interaction")
+    };
+    let Some(pb::interaction_update::Message::ToolCallStarted(started)) = update.message.as_ref()
+    else {
+        panic!("expected tool-start message")
+    };
+    let Some(pb::tool_call::Tool::McpToolCall(tool)) = started
+        .tool_call
+        .as_ref()
+        .and_then(|call| call.tool.as_ref())
+    else {
+        panic!("expected MCP tool start")
+    };
+    let display = tool.args.as_ref().expect("MCP start has no args");
+    assert_eq!(
+        display.name, "plugin-browser-use-browser-use-browser_exec",
+        "the Cursor card must show the resolved MCP route name"
+    );
+    assert_eq!(display.provider_identifier, "browser-use");
+    assert_eq!(display.tool_name, "browser_exec");
+    assert_eq!(display.server_identifier, "plugin-browser-use-browser-use");
+    assert_eq!(
+        display.args["code"].kind,
+        Some(prost_types::value::Kind::StringValue("print('ok')".into()))
+    );
+
     let event = codec::client_event(
         &pb::ExecClientMessage {
             id: exec.id,
@@ -305,6 +335,193 @@ async fn call_mcp_tool_uses_the_request_descriptor_and_returns_client_errors_to_
     };
     assert_eq!(completion.result().content, "invalid browser arguments");
     assert!(completion.result().is_error);
+
+    let Some(pb::tool_call::Tool::McpToolCall(tool)) = completion.tool_call().tool.as_ref() else {
+        panic!("expected rendered MCP completion")
+    };
+    let display = tool.args.as_ref().expect("MCP completion has no args");
+    assert_eq!(display.name, "plugin-browser-use-browser-use-browser_exec");
+    assert_eq!(display.provider_identifier, "browser-use");
+    assert_eq!(display.tool_name, "browser_exec");
+    assert_eq!(display.server_identifier, "plugin-browser-use-browser-use");
+    assert_eq!(tool.description.as_deref(), Some("fixture MCP tool"));
+
+    let mut steps = cursor_server::cursor::checkpoint::StepBuffer::default();
+    steps.tool_completed(&completion);
+    let steps = steps.take().steps;
+    let Some(pb::conversation_step::Message::ToolCall(saved)) = &steps[0].message else {
+        panic!("expected saved MCP step")
+    };
+    let Some(pb::tool_call::Tool::McpToolCall(saved)) = saved.tool.as_ref() else {
+        panic!("expected saved MCP step tool")
+    };
+    let saved = saved.args.as_ref().expect("saved MCP step has no args");
+    assert_eq!(saved.name, "plugin-browser-use-browser-use-browser_exec");
+    assert_eq!(saved.provider_identifier, "browser-use");
+    assert_eq!(saved.tool_name, "browser_exec");
+    assert_eq!(saved.server_identifier, "plugin-browser-use-browser-use");
+}
+
+#[tokio::test]
+async fn mcp_display_description_comes_from_the_route_descriptor() {
+    let runtime = CursorToolRuntime::default();
+    let dispatcher = ToolDispatcher::new(runtime.clone());
+    let mut invocation = call("call-look", "CallMcpTool");
+    invocation.arguments = json!({
+        "server": "user-blender",
+        "toolName": "look",
+        "description": "model wording",
+        "arguments": {"mode": "viewport"}
+    });
+    let dispatched = dispatcher
+        .start_batch(
+            &[invocation],
+            ToolBatchState {
+                completed: &HashSet::new(),
+                started: &HashSet::new(),
+                response_text: "",
+                response_thinking: "",
+            },
+            &[],
+            &BTreeMap::new(),
+            &mcp_context("user-blender", "blender", "look"),
+        )
+        .await
+        .unwrap();
+    let Some(pb::agent_server_message::Message::InteractionUpdate(update)) =
+        dispatched[0].messages[0].message.as_ref()
+    else {
+        panic!("expected tool-start interaction")
+    };
+    let Some(pb::interaction_update::Message::ToolCallStarted(started)) = update.message.as_ref()
+    else {
+        panic!("expected tool-start message")
+    };
+    let Some(pb::tool_call::Tool::McpToolCall(tool)) = started
+        .tool_call
+        .as_ref()
+        .and_then(|call| call.tool.as_ref())
+    else {
+        panic!("expected MCP tool start")
+    };
+    let display = tool.args.as_ref().expect("MCP start has no args");
+    assert_eq!(display.name, "user-blender-look");
+    assert_eq!(display.provider_identifier, "blender");
+    assert_eq!(display.tool_name, "look");
+    assert_eq!(display.server_identifier, "user-blender");
+    assert_eq!(tool.description.as_deref(), Some("fixture MCP tool"));
+}
+
+const FRAME_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50,
+    0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn mcp_image_completion_keeps_the_route_identity_and_pixels() {
+    let runtime = CursorToolRuntime::default();
+    let dispatcher = ToolDispatcher::new(runtime.clone());
+    let mut invocation = call("call-look", "CallMcpTool");
+    invocation.arguments = json!({
+        "server": "user-blender",
+        "toolName": "look",
+        "description": "model wording",
+        "arguments": {"mode": "viewport"}
+    });
+    let dispatched = dispatcher
+        .start_batch(
+            &[invocation],
+            ToolBatchState {
+                completed: &HashSet::new(),
+                started: &HashSet::new(),
+                response_text: "",
+                response_thinking: "",
+            },
+            &[],
+            &BTreeMap::new(),
+            &mcp_context("user-blender", "blender", "look"),
+        )
+        .await
+        .unwrap();
+    let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) =
+        dispatched[0].messages[1].message.as_ref()
+    else {
+        panic!("expected MCP Exec")
+    };
+    let event = codec::client_event(
+        &pb::ExecClientMessage {
+            id: exec.id,
+            message: Some(pb::exec_client_message::Message::McpResult(pb::McpResult {
+                result: Some(pb::mcp_result::Result::Success(pb::McpSuccess {
+                    content: vec![
+                        pb::McpToolResultContentItem {
+                            content: Some(pb::mcp_tool_result_content_item::Content::Text(
+                                pb::McpTextContent {
+                                    text: "viewport captured".into(),
+                                    output_location: None,
+                                },
+                            )),
+                        },
+                        pb::McpToolResultContentItem {
+                            content: Some(pb::mcp_tool_result_content_item::Content::Image(
+                                pb::McpImageContent {
+                                    data: FRAME_PNG.to_vec(),
+                                    mime_type: "image/png".into(),
+                                },
+                            )),
+                        },
+                    ],
+                    is_error: false,
+                    structured_content: None,
+                })),
+            })),
+            ..Default::default()
+        },
+        &runtime,
+    )
+    .await
+    .unwrap();
+    let codec::ClientExecEvent::Completed(completion) = event else {
+        panic!("expected MCP completion")
+    };
+    assert!(completion.result().content.contains("MCP image: image/png"));
+
+    let Some(pb::tool_call::Tool::McpToolCall(tool)) = completion.tool_call().tool.as_ref() else {
+        panic!("expected rendered MCP completion")
+    };
+    let display = tool.args.as_ref().expect("MCP completion has no args");
+    assert_eq!(display.name, "user-blender-look");
+    assert_eq!(display.provider_identifier, "blender");
+    assert_eq!(display.tool_name, "look");
+    assert_eq!(display.server_identifier, "user-blender");
+    assert_eq!(tool.description.as_deref(), Some("fixture MCP tool"));
+
+    let mut steps = cursor_server::cursor::checkpoint::StepBuffer::default();
+    steps.tool_completed(&completion);
+    let steps = steps.take().steps;
+    let Some(pb::conversation_step::Message::ToolCall(saved)) = &steps[0].message else {
+        panic!("expected saved MCP step")
+    };
+    let Some(pb::tool_call::Tool::McpToolCall(saved)) = saved.tool.as_ref() else {
+        panic!("expected saved MCP step tool")
+    };
+    let saved_args = saved.args.as_ref().expect("saved MCP step has no args");
+    assert_eq!(saved_args.name, "user-blender-look");
+    assert_eq!(saved_args.provider_identifier, "blender");
+    let Some(pb::mcp_tool_result::Result::Success(success)) = saved
+        .result
+        .as_ref()
+        .and_then(|result| result.result.as_ref())
+    else {
+        panic!("saved MCP step lost its result")
+    };
+    assert!(success.content.iter().any(|item| matches!(
+        item.content,
+        Some(pb::mcp_tool_result_content_item::Content::Image(_))
+    )));
 }
 
 #[tokio::test]

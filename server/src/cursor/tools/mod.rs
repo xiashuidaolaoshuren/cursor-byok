@@ -192,7 +192,11 @@ impl ToolDispatcher {
     ) -> Result<DispatchedTool> {
         let call = context.prepare_call(call)?;
         let mut messages = if publish_started {
-            vec![codec::tool_started(&call, dynamic_mcp.get(&call.name))?]
+            vec![codec::tool_started(
+                &call,
+                dynamic_mcp.get(&call.name),
+                context.mcp_route(&call),
+            )?]
         } else {
             Vec::new()
         };

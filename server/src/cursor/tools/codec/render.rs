@@ -6,6 +6,7 @@ use crate::{
         protocol::proto::agent::v1 as pb,
         tools::{
             codec, edit,
+            runtime::McpRoute,
             tool_call_result::{self as tool_result, ToolCompletion},
         },
     },
@@ -134,10 +135,14 @@ pub(crate) fn create_plan_partial(
 pub fn tool_started(
     call: &ToolCall,
     dynamic_mcp: Option<&pb::McpToolDefinition>,
+    mcp_route: Option<&McpRoute>,
 ) -> Result<pb::AgentServerMessage> {
     let tool_call = match dynamic_mcp {
         Some(definition) => render_dynamic_mcp(call, definition, false),
-        None => render_tool_call(call, false)?,
+        None => match mcp_route {
+            Some(route) => render_meta_mcp(call, route, false),
+            None => render_tool_call(call, false)?,
+        },
     };
     Ok(server_interaction(
         pb::interaction_update::Message::ToolCallStarted(pb::ToolCallStartedUpdate {
@@ -193,6 +198,38 @@ fn dynamic_mcp_tool_call(
             }),
             result: None,
             description: Some(definition.description.clone()),
+        })),
+    }
+}
+
+/// Renders a `CallMcpTool` from the route that dispatched it. The client keys
+/// MCP presentation on `name`, `provider_identifier`, and `server_identifier`;
+/// rebuilding them from the model's display arguments loses the server.
+pub fn render_meta_mcp(call: &ToolCall, route: &McpRoute, completed: bool) -> pb::ToolCall {
+    let timestamp = now_ms();
+    let description = route.description.trim();
+    pb::ToolCall {
+        hook_additional_contexts: Vec::new(),
+        tool_call_id: Some(call.call_id.clone()),
+        started_at_ms: Some(timestamp),
+        completed_at_ms: completed.then_some(timestamp),
+        tool: Some(pb::tool_call::Tool::McpToolCall(pb::McpToolCall {
+            args: Some(pb::McpArgs {
+                name: route.name.clone(),
+                args: call
+                    .arguments
+                    .get("arguments")
+                    .and_then(Value::as_object)
+                    .map(codec::json_object_to_prost)
+                    .unwrap_or_default(),
+                tool_call_id: call.call_id.clone(),
+                provider_identifier: route.provider_identifier.clone(),
+                tool_name: route.tool_name.clone(),
+                server_identifier: route.server_identifier.clone(),
+                ..Default::default()
+            }),
+            result: None,
+            description: (!description.is_empty()).then(|| description.to_string()),
         })),
     }
 }

@@ -281,12 +281,16 @@ pub fn mcp_request(
 pub(crate) fn mcp_meta_request(
     id: u32,
     call: &ToolCall,
-    server_identifier: &str,
     route: &McpRoute,
 ) -> Result<pb::AgentServerMessage> {
-    if route.name.is_empty() || route.provider_identifier.is_empty() || route.tool_name.is_empty() {
+    if route.name.is_empty()
+        || route.provider_identifier.is_empty()
+        || route.tool_name.is_empty()
+        || route.server_identifier.is_empty()
+    {
         return Err(Error::Protocol(format!(
-            "MCP definition for {server_identifier} is incomplete"
+            "MCP definition for {} is incomplete",
+            route.server_identifier
         )));
     }
     let requested_tool = call
@@ -322,7 +326,7 @@ pub(crate) fn mcp_meta_request(
             )?,
             smart_mode_approval_only: false,
             skip_approval: false,
-            server_identifier: server_identifier.into(),
+            server_identifier: route.server_identifier.clone(),
         }),
         Some(true),
     ))

@@ -35,8 +35,8 @@ pub(super) async fn start(
                     )?),
                 });
             };
-            let id = runtime.reserve_exec(call, context).await?;
-            codec::mcp_meta_request(id, call, server, route)?
+            let id = runtime.reserve_meta_mcp(call, context, route).await?;
+            codec::mcp_meta_request(id, call, route)?
         }
         _ => {
             let id = runtime.reserve_exec(call, context).await?;

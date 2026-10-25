@@ -392,6 +392,7 @@ pub fn meta_mcp_routes(context: &pb::RequestContext) -> HashMap<(String, String)
                         name: format!("{}-{}", server.server_identifier, tool.tool_name),
                         provider_identifier,
                         tool_name: tool.tool_name.clone(),
+                        server_identifier: server.server_identifier.clone(),
                         description: tool.description.clone().unwrap_or_default(),
                     },
                 ))
@@ -625,5 +626,41 @@ mod tests {
         let mut context = pb::RequestContext::default();
         merge_local_rules(&mut context, &directory.path().join("nested/rules"));
         assert!(context.non_file_rules.is_empty());
+    }
+
+    #[test]
+    fn meta_mcp_routes_keep_the_resolved_server_identity() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![pb::McpDescriptor {
+                    server_name: "blender".into(),
+                    server_identifier: "user-blender".into(),
+                    tools: vec![pb::McpToolDescriptor {
+                        tool_name: "look".into(),
+                        description: Some(
+                            "Capture the current Blender viewport as an image".into(),
+                        ),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let routes = meta_mcp_routes(&context);
+        let route = routes
+            .get(&("user-blender".into(), "look".into()))
+            .expect("route is keyed by the server identifier");
+
+        assert_eq!(route.name, "user-blender-look");
+        assert_eq!(route.provider_identifier, "blender");
+        assert_eq!(route.tool_name, "look");
+        assert_eq!(route.server_identifier, "user-blender");
+        assert_eq!(
+            route.description,
+            "Capture the current Blender viewport as an image"
+        );
     }
 }

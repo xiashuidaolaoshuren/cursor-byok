@@ -51,6 +51,7 @@ pub(crate) fn from_exec(
         ExecStage::DynamicMcp(definition) => {
             interaction::render_dynamic_mcp(call, definition, false)
         }
+        ExecStage::MetaMcp(route) => interaction::render_meta_mcp(call, route, false),
         _ => interaction::render_tool_call(call, false)?,
     };
     match (rendered.tool.as_mut(), wire_result) {

@@ -6,14 +6,17 @@ mod request;
 mod response;
 
 use crate::{
-    cursor::protocol::{events::server_interaction, proto::agent::v1 as pb},
+    cursor::{
+        protocol::{events::server_interaction, proto::agent::v1 as pb},
+        tools::runtime::McpRoute,
+    },
     model::ToolCall,
     Error, Result,
 };
 
 pub use query::tool_query;
 pub(crate) use render::{create_plan_partial, edit_content_delta, edit_path_partial, task_partial};
-pub use render::{dynamic_mcp_placeholder, render_dynamic_mcp, tool_completed};
+pub use render::{dynamic_mcp_placeholder, render_dynamic_mcp, render_meta_mcp, tool_completed};
 pub use request::{abort, mcp_request, mcp_state_request, request};
 pub(crate) use request::{edit_read_request, json_object_to_prost, mcp_meta_request};
 pub use response::{client_event, stream_closed, ClientExecEvent};
@@ -46,10 +49,15 @@ pub fn render_tool_call(call: &ToolCall, completed: bool) -> Result<pb::ToolCall
 pub fn tool_started(
     call: &ToolCall,
     dynamic_mcp: Option<&pb::McpToolDefinition>,
+    mcp_route: Option<&McpRoute>,
 ) -> Result<pb::AgentServerMessage> {
-    match builtin_tool_started(call, dynamic_mcp) {
+    match builtin_tool_started(call, dynamic_mcp, mcp_route) {
         Ok(message) => Ok(message),
-        Err(error) if dynamic_mcp.is_none() && is_unsupported_tool(&error, &call.name) => {
+        Err(error)
+            if dynamic_mcp.is_none()
+                && mcp_route.is_none()
+                && is_unsupported_tool(&error, &call.name) =>
+        {
             Ok(server_interaction(
                 pb::interaction_update::Message::ToolCallStarted(pb::ToolCallStartedUpdate {
                     call_id: call.call_id.clone(),
