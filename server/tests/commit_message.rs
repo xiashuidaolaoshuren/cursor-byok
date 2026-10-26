@@ -4,14 +4,17 @@ mod fake_provider;
 #[path = "support/fixtures.rs"]
 mod fixtures;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
 };
 use cursor_server::{
-    api::cursor,
+    api::cursor::{self, proxy::UPSTREAM_URL_HEADER},
     cursor::{
         prompting::{PromptAssets, PromptCompiler},
         protocol::{connect, proto::aiserver::v1 as ai},
@@ -20,7 +23,9 @@ use cursor_server::{
     model::{ContentPart, ModelConfigInput, ModelType, ProjectedContent, OPENAI_CHAT_ENDPOINT},
     network::NetworkClients,
     provider::{FinishReason, ModelEvent},
-    store::{CommitPromptLocale, CommitSettings, DEFAULT_COMMIT_PROMPT_ZH_CN},
+    store::{
+        CommitPromptLocale, CommitSettings, TabMode, TabSettings, DEFAULT_COMMIT_PROMPT_ZH_CN,
+    },
 };
 use tower::ServiceExt;
 
@@ -248,4 +253,50 @@ async fn unconfigured_model_is_rejected() {
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("missing-hash"));
+}
+
+#[tokio::test]
+async fn direct_commit_message_forwards_to_cursor_not_the_tab_service() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let tab_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = tab_hits.clone();
+    tokio::spawn(async move {
+        let app = axum::Router::new().fallback(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        });
+        axum::serve(listener, app).await.unwrap();
+    });
+    store
+        .set_tab_settings(TabSettings {
+            mode: TabMode::Custom,
+            address: format!("http://{address}"),
+        })
+        .await
+        .unwrap();
+    let router = commit_router(store, fake_provider::FakeProvider::default()).await;
+
+    let body = connect::encode_message(&diff_request("diff --git a/x.rs")).unwrap();
+    let response = router
+        .oneshot(
+            Request::post("/aiserver.v1.AiService/WriteGitCommitMessage")
+                .header(header::CONTENT_TYPE, "application/proto")
+                .header(UPSTREAM_URL_HEADER, "http://api2.cursor.sh/ignored")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        tab_hits.load(Ordering::SeqCst),
+        0,
+        "direct commit must not reach the TAB service"
+    );
 }

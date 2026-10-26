@@ -2,10 +2,11 @@
 //!
 //! Cursor sends `aiserver.v1.AiService/WriteGitCommitMessage` with the staged
 //! diffs. Empty commit-settings `model_id` keeps the original behaviour and
-//! forwards the RPC unchanged (直连). A configured local model identifier
-//! answers the request locally: truncated diffs + previous commits form the user
-//! message, the customizable commit prompt is the system prompt, and the raw
-//! completion is cleaned before being returned.
+//! forwards the RPC to Cursor's own upstream (直连), independently of the TAB
+//! service configuration. A configured local model identifier answers the
+//! request locally: truncated diffs + previous commits form the user message,
+//! the customizable commit prompt is the system prompt, and the raw completion
+//! is cleaned before being returned.
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -50,21 +51,9 @@ pub async fn write_git_commit_message(
 ) -> Result<Response<Body>> {
     let settings = registry.store().commit_settings().await?;
     if settings.is_direct() {
-        return forward_direct(&registry, upstream, request).await;
+        return proxy::forward(Extension(upstream), request).await;
     }
     generate_local(&registry, request, settings).await
-}
-
-async fn forward_direct(
-    registry: &TransportRegistry,
-    upstream: CursorProxy,
-    request: Request<Body>,
-) -> Result<Response<Body>> {
-    let settings = registry.store().tab_settings().await?;
-    match settings.service_url() {
-        Some(service_url) => proxy::forward_to_service(&upstream, request, service_url).await,
-        None => proxy::forward(Extension(upstream), request).await,
-    }
 }
 
 async fn generate_local(
